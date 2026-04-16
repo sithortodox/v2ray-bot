@@ -15,14 +15,16 @@ def _parse_vmess(raw: str) -> dict | None:
         encoded = raw.replace("vmess://", "")
         d = json.loads(base64.b64decode(_pad(encoded)))
         tls_val = d.get("tls", "")
-        if tls_val == "":
+        if not tls_val or tls_val == "0" or tls_val.lower() == "false":
             tls_val = "none"
+        elif tls_val.lower() == "tls" or tls_val == "1" or tls_val.lower() == "true":
+            tls_val = "tls"
         return {
             "address": d.get("add", ""),
             "port": int(d.get("port", 0)),
             "uuid": d.get("id", ""),
             "alterId": int(d.get("aid", 0)),
-            "network": d.get("net", "tcp"),
+            "network": d.get("net", "tcp") or "tcp",
             "security": tls_val,
             "host": d.get("host", ""),
             "path": d.get("path", ""),
@@ -32,6 +34,8 @@ def _parse_vmess(raw: str) -> dict | None:
             "pbk": d.get("pbk", ""),
             "sid": d.get("sid", ""),
             "alpn": d.get("alpn", ""),
+            "scy": d.get("scy", d.get("security", "auto")),
+            "insecure": d.get("insecure", d.get("allowInsecure", "")),
         }
     except Exception:
         return None
@@ -53,12 +57,15 @@ def _parse_vless(raw: str) -> dict | None:
                 if "=" in p:
                     k, v = p.split("=", 1)
                     params[k] = unquote(v)
+        security = params.get("security", "none")
+        if not security or security == "0":
+            security = "none"
         return {
             "address": server,
             "port": int(port_str),
             "uuid": uuid,
-            "network": params.get("type", "tcp"),
-            "security": params.get("security", "none"),
+            "network": params.get("type", "tcp") or "tcp",
+            "security": security,
             "sni": params.get("sni", ""),
             "path": params.get("path", ""),
             "host": params.get("host", ""),
@@ -90,21 +97,21 @@ def _parse_trojan(raw: str) -> dict | None:
                     k, v = p.split("=", 1)
                     params[k] = unquote(v)
         security = params.get("security", "tls")
-        if security == "":
+        if not security:
             security = "tls"
         return {
             "address": server,
             "port": int(port_str),
             "password": unquote(password),
-            "network": params.get("type", "tcp"),
+            "network": params.get("type", "tcp") or "tcp",
             "security": security,
             "sni": params.get("sni", ""),
             "path": params.get("path", ""),
             "host": params.get("host", ""),
             "serviceName": params.get("serviceName", ""),
-            "allowInsecure": params.get("allowInsecure", "0") == "1",
             "alpn": params.get("alpn", ""),
             "fp": params.get("fp", ""),
+            "allowInsecure": params.get("allowInsecure", "0") == "1",
         }
     except Exception:
         return None
@@ -140,27 +147,26 @@ def _build_stream(params: dict) -> dict:
     if network == "h2":
         network = "http"
     security = params.get("security", "none")
-    if security in ("", "0", "false", "None"):
-        security = "none"
     stream = {"network": network}
 
     if security == "reality":
         stream["security"] = "reality"
-        rset = {}
+        rset = {
+            "fingerprint": params.get("fp") or "chrome",
+        }
         if params.get("sni"):
             rset["serverName"] = params["sni"]
-        if params.get("fp"):
-            rset["fingerprint"] = params["fp"]
-        else:
-            rset["fingerprint"] = "chrome"
         if params.get("pbk"):
             rset["publicKey"] = params["pbk"]
-        if params.get("sid"):
+        if params.get("sid") is not None:
             rset["shortId"] = params["sid"]
         stream["realitySettings"] = rset
-    elif security in ("tls", "1", "true"):
+
+    elif security in ("tls",):
         stream["security"] = "tls"
-        tset = {}
+        tset = {
+            "fingerprint": params.get("fp") or "chrome",
+        }
         sni = params.get("sni", "")
         if not sni and params.get("host"):
             sni = params["host"]
@@ -170,20 +176,26 @@ def _build_stream(params: dict) -> dict:
             tset["allowInsecure"] = True
         if params.get("allowInsecure"):
             tset["allowInsecure"] = True
-        if params.get("alpn"):
-            tset["alpn"] = params["alpn"].split(",")
-        if params.get("fp"):
-            tset["fingerprint"] = params["fp"]
+        if params.get("insecure") and str(params["insecure"]) not in ("0", "false", ""):
+            tset["allowInsecure"] = True
+        alpn = params.get("alpn", "")
+        if alpn:
+            tset["alpn"] = [a.strip() for a in alpn.split(",")]
         stream["tlsSettings"] = tset
+
     else:
         stream["security"] = "none"
 
     if network == "ws":
         ws = {}
-        if params.get("path"):
-            ws["path"] = params["path"]
-        if params.get("host"):
-            ws["headers"] = {"Host": params["host"]}
+        path = params.get("path", "")
+        if path:
+            ws["path"] = path
+        else:
+            ws["path"] = "/"
+        host_val = params.get("host", "")
+        if host_val:
+            ws["headers"] = {"Host": host_val}
         stream["wsSettings"] = ws
     elif network == "grpc":
         grpc = {}
@@ -192,8 +204,9 @@ def _build_stream(params: dict) -> dict:
         stream["grpcSettings"] = grpc
     elif network == "http":
         h2 = {}
-        if params.get("path"):
-            h2["path"] = params["path"]
+        path = params.get("path", "")
+        if path:
+            h2["path"] = path
         host_val = params.get("host", "")
         if host_val:
             h2["host"] = [h.strip() for h in host_val.split(",")]
@@ -222,21 +235,25 @@ def generate_xray_config(raw_url: str, local_port: int) -> dict | None:
         return None
 
     if protocol == "vmess":
+        scy = params.get("scy", "auto")
+        if scy in ("auto", "none", ""):
+            scy = "auto"
         outbound = {
             "protocol": "vmess",
             "settings": {
                 "vnext": [{
                     "address": params["address"],
                     "port": params["port"],
-                    "users": [{"id": params["uuid"], "alterId": params["alterId"], "security": "auto"}],
+                    "users": [{"id": params["uuid"], "alterId": params["alterId"], "security": scy}],
                 }]
             },
             "streamSettings": _build_stream(params),
         }
     elif protocol == "vless":
         user = {"id": params["uuid"], "encryption": "none"}
-        if params.get("flow"):
-            user["flow"] = params["flow"]
+        flow = params.get("flow", "")
+        if flow and flow != "none":
+            user["flow"] = flow
         outbound = {
             "protocol": "vless",
             "settings": {

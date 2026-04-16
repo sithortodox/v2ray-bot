@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import socket
 import tempfile
 
 from parser import ParsedConfig
@@ -16,11 +15,8 @@ XRAY_START_DELAY = 3
 MAX_CONCURRENT = 2
 DELAY_BETWEEN_CHECKS = 3
 RETRY_ATTEMPTS = 2
-TEST_URLS = [
-    "http://ip-api.com/json?fields=query",
-    "https://api.ipify.org?format=json",
-]
-_local_port_counter = 30000
+IP_CHECK_URL = "http://ip-api.com/json"
+_local_port_counter = 40000
 
 
 def _next_port() -> int:
@@ -52,32 +48,37 @@ async def _wait_for_port(port: int, timeout: float = 5) -> bool:
     return False
 
 
-async def _test_proxy(port: int, timeout: int) -> bool:
-    for url in TEST_URLS:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s",
-                "--socks5-hostname", f"127.0.0.1:{port}",
-                "--connect-timeout", str(timeout),
-                "-m", str(timeout + 3),
-                url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
-            body = stdout.decode().strip()
-            if not body:
-                continue
-            try:
-                data = json.loads(body)
-                ip = data.get("query") or data.get("ip", "")
-                if ip and not _is_private_ip(ip):
-                    return True
-            except json.JSONDecodeError:
-                pass
-        except Exception:
-            continue
-    return False
+async def _verify_proxy(port: int, timeout: int) -> bool:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-s",
+            "--socks5-hostname", f"127.0.0.1:{port}",
+            "--connect-timeout", str(timeout),
+            "-m", str(timeout + 5),
+            IP_CHECK_URL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 8)
+
+        if proc.returncode != 0:
+            return False
+
+        body = stdout.decode().strip()
+        if not body:
+            return False
+
+        data = json.loads(body)
+        if data.get("status") != "success":
+            return False
+
+        ip = data.get("query", "")
+        if not ip or _is_private_ip(ip):
+            return False
+
+        return True
+    except (json.JSONDecodeError, asyncio.TimeoutError, Exception):
+        return False
 
 
 async def check_config(config: ParsedConfig) -> bool:
@@ -108,19 +109,16 @@ async def check_config(config: ParsedConfig) -> bool:
         if process.returncode is not None:
             return False
 
-        port_ready = await _wait_for_port(port, timeout=3)
-        if not port_ready:
-            logger.debug("Port %d not ready for %s", port, config.name)
+        if not await _wait_for_port(port, timeout=4):
             return False
 
         for attempt in range(RETRY_ATTEMPTS):
-            if await _test_proxy(port, CHECK_TIMEOUT_SECONDS):
+            if await _verify_proxy(port, CHECK_TIMEOUT_SECONDS):
                 logger.info("WORKING: %s:%d (%s) [%s]", config.server, config.port, config.name, config.protocol)
                 return True
             if attempt < RETRY_ATTEMPTS - 1:
                 await asyncio.sleep(2)
 
-        logger.debug("FAILED: %s:%d (%s) [%s]", config.server, config.port, config.name, config.protocol)
         return False
 
     except Exception as e:
