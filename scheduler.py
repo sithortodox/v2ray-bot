@@ -1,15 +1,13 @@
-import logging
 import asyncio
+import logging
 from datetime import datetime
 from aiogram import Bot
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import (
     add_config,
     update_config_status,
     delete_config,
     get_configs_to_recheck,
-    get_working_configs,
 )
 from scraper import scrape_all
 from checker import check_config
@@ -19,19 +17,38 @@ from config import CHECK_INTERVAL_MINUTES
 
 logger = logging.getLogger(__name__)
 
+MAX_NEW_CONFIGS_PER_CYCLE = 80
+DELAY_BETWEEN_CHECKS = 2
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 scheduler = AsyncIOScheduler()
+
+
+async def _get_existing(raw: str):
+    from database import get_config_by_raw
+    return await get_config_by_raw(raw)
+
+
+async def _update_by_raw(raw: str, is_working: bool):
+    from database import get_config_by_raw, update_config_status
+    existing = await get_config_by_raw(raw)
+    if existing:
+        await update_config_status(existing["id"], is_working)
 
 
 async def _run_check_cycle(bot: Bot):
     logger.info("=== Check cycle started at %s ===", datetime.utcnow().isoformat())
 
-    # Phase 1: Scrape new configs from GitHub
     logger.info("Phase 1: Scraping GitHub...")
     new_configs = await scrape_all()
+    new_configs = new_configs[:MAX_NEW_CONFIGS_PER_CYCLE]
+    logger.info("Scraped %d configs (limited to %d)", len(new_configs), MAX_NEW_CONFIGS_PER_CYCLE)
+
     new_working: list[dict] = []
 
-    for cfg in new_configs:
-        existing = await _get_existing(cfg)
+    for i, cfg in enumerate(new_configs):
+        existing = await _get_existing(cfg.raw)
         if existing:
             continue
 
@@ -48,7 +65,7 @@ async def _run_check_cycle(bot: Bot):
 
         is_working = await check_config(cfg)
         if is_working:
-            await update_config_status_by_raw(cfg.raw, True)
+            await _update_by_raw(cfg.raw, True)
             new_working.append({
                 "protocol": cfg.protocol,
                 "raw_config": cfg.raw,
@@ -56,16 +73,19 @@ async def _run_check_cycle(bot: Bot):
                 "server": cfg.server,
                 "source": "",
             })
-            logger.info("New working config: %s (%s)", cfg.name, cfg.protocol)
+            logger.info("[%d/%d] NEW WORKING: %s (%s)", i + 1, len(new_configs), cfg.name, cfg.protocol)
+        else:
+            logger.debug("[%d/%d] not working: %s (%s)", i + 1, len(new_configs), cfg.name, cfg.protocol)
 
-    logger.info("Phase 1 done. New working: %d / %d scraped", len(new_working), len(new_configs))
+        await asyncio.sleep(DELAY_BETWEEN_CHECKS)
 
-    # Phase 2: Recheck existing working configs
-    logger.info("Phase 2: Rechecking existing configs...")
+    logger.info("Phase 1 done. New working: %d / %d checked", len(new_working), len(new_configs))
+
+    logger.info("Phase 2: Rechecking existing working configs...")
     existing_working = await get_configs_to_recheck()
     dead_configs: list[dict] = []
 
-    for cfg_row in existing_working:
+    for i, cfg_row in enumerate(existing_working):
         parsed = ParsedConfig(
             protocol=cfg_row["protocol"],
             raw=cfg_row["raw_config"],
@@ -79,29 +99,18 @@ async def _run_check_cycle(bot: Bot):
         else:
             dead_configs.append(dict(cfg_row))
             await delete_config(cfg_row["id"])
-            logger.info("Dead config removed: %s (%s)", cfg_row["name"], cfg_row["protocol"])
+            logger.info("[%d/%d] DEAD: %s (%s)", i + 1, len(existing_working), cfg_row["name"], cfg_row["protocol"])
+
+        await asyncio.sleep(DELAY_BETWEEN_CHECKS)
 
     logger.info("Phase 2 done. Dead: %d / %d rechecked", len(dead_configs), len(existing_working))
 
-    # Phase 3: Broadcast
     if new_working:
         await broadcast_new_configs(bot, new_working)
     if dead_configs:
         await broadcast_dead_configs(bot, dead_configs)
 
     logger.info("=== Check cycle finished ===")
-
-
-async def _get_existing(cfg: ParsedConfig):
-    from database import get_config_by_raw
-    return await get_config_by_raw(cfg.raw)
-
-
-async def update_config_status_by_raw(raw: str, is_working: bool):
-    from database import get_config_by_raw, update_config_status
-    existing = await get_config_by_raw(raw)
-    if existing:
-        await update_config_status(existing["id"], is_working)
 
 
 def start_scheduler(bot: Bot):
