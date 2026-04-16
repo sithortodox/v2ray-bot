@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - bot_db:/app/v2ray_bot.db
+      - bot_db:/app/data
 
 volumes:
   bot_db:
