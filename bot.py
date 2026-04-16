@@ -14,7 +14,7 @@ def _format_config(cfg: dict) -> str:
     name = cfg.get("name", "unnamed")
     protocol = cfg.get("protocol", "unknown")
     raw = cfg.get("raw_config", "")
-    return f"<b>{name}</b> [{protocol}]\n<code>{raw}</code>"
+    return f"{name} [{protocol}]\n{raw}"
 
 
 @router.message(Command("start"))
@@ -63,20 +63,20 @@ async def cmd_unsubscribe(message: types.Message):
 
 
 async def _send_configs(user_id: int, configs: list[dict], header: str, bot: Bot):
-    text = f"<b>{header}</b>\n\n"
+    text = f"{header}\n\n"
     for cfg in configs:
         entry = _format_config(cfg) + "\n\n"
         if len(text) + len(entry) > MAX_MSG_LEN:
             try:
-                await bot.send_message(user_id, text.rstrip(), parse_mode="HTML", disable_web_page_preview=True)
+                await bot.send_message(user_id, text.rstrip())
             except Exception as e:
                 logger.error("Send error to %s: %s", user_id, e)
-            text = f"<b>{header} (продолжение)</b>\n\n"
+            text = f"{header} (продолжение)\n\n"
             await asyncio.sleep(0.3)
         text += entry
     if text.strip():
         try:
-            await bot.send_message(user_id, text.rstrip(), parse_mode="HTML", disable_web_page_preview=True)
+            await bot.send_message(user_id, text.rstrip())
         except Exception as e:
             logger.error("Send error to %s: %s", user_id, e)
 
@@ -95,11 +95,11 @@ async def broadcast_dead_configs(bot: Bot, configs: list[dict]):
         return
     users = await get_all_users()
     for user_id in users:
-        text = f"<b>Удалены нерабочие конфиги ({len(configs)}):</b>\n"
+        text = f"Удалены нерабочие конфиги ({len(configs)}):\n"
         for c in configs[:30]:
             name = c.get("name", "unnamed")
             text += f"  - {name} ({c.get('protocol', '?')})\n"
         try:
-            await bot.send_message(user_id, text, parse_mode="HTML")
+            await bot.send_message(user_id, text)
         except Exception as e:
             logger.error("Send error to %s: %s", user_id, e)
