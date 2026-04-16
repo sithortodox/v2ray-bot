@@ -1,34 +1,20 @@
+import asyncio
 import logging
-from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram import Bot, Router, types
 from aiogram.filters import Command
-from aiogram.types import FSInputFile
 from database import add_user, get_working_configs, get_stats, get_all_users
-from config import MAX_CONFIGS_PER_MESSAGE
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+MAX_MSG_LEN = 3800
 
 
 def _format_config(cfg: dict) -> str:
     name = cfg.get("name", "unnamed")
     protocol = cfg.get("protocol", "unknown")
-    source = cfg.get("source", "")
     raw = cfg.get("raw_config", "")
-    lines = [
-        f"<b>{name}</b>",
-        f"Protocol: <code>{protocol}</code>",
-    ]
-    if source:
-        lines.append(f"Source: <a href='{source}'>GitHub</a>")
-    lines.append(f"<code>{raw}</code>")
-    return "\n".join(lines)
-
-
-def _split_configs(configs: list[dict], max_per_msg: int = MAX_CONFIGS_PER_MESSAGE) -> list[list[dict]]:
-    chunks = []
-    for i in range(0, len(configs), max_per_msg):
-        chunks.append(configs[i : i + max_per_msg])
-    return chunks
+    return f"<b>{name}</b> [{protocol}]\n<code>{raw}</code>"
 
 
 @router.message(Command("start"))
@@ -50,10 +36,7 @@ async def cmd_get(message: types.Message):
     if not configs:
         await message.answer("Рабочих конфигов пока нет. Подожди, идёт сбор.")
         return
-    chunks = _split_configs(configs)
-    for chunk in chunks:
-        text = "\n\n---\n\n".join(_format_config(c) for c in chunk)
-        await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+    await _send_configs(message.from_user.id, configs, header="Рабочие конфиги:", bot=message.bot)
 
 
 @router.message(Command("status"))
@@ -79,22 +62,32 @@ async def cmd_unsubscribe(message: types.Message):
     await message.answer("Подписка отменена.")
 
 
+async def _send_configs(user_id: int, configs: list[dict], header: str, bot: Bot):
+    text = f"<b>{header}</b>\n\n"
+    for cfg in configs:
+        entry = _format_config(cfg) + "\n\n"
+        if len(text) + len(entry) > MAX_MSG_LEN:
+            try:
+                await bot.send_message(user_id, text.rstrip(), parse_mode="HTML", disable_web_page_preview=True)
+            except Exception as e:
+                logger.error("Send error to %s: %s", user_id, e)
+            text = f"<b>{header} (продолжение)</b>\n\n"
+            await asyncio.sleep(0.3)
+        text += entry
+    if text.strip():
+        try:
+            await bot.send_message(user_id, text.rstrip(), parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            logger.error("Send error to %s: %s", user_id, e)
+
+
 async def broadcast_new_configs(bot: Bot, configs: list[dict]):
     if not configs:
         return
     users = await get_all_users()
-    chunks = _split_configs(configs)
     for user_id in users:
-        for chunk in chunks:
-            text = "<b>Новые рабочие конфиги:</b>\n\n" + "\n\n---\n\n".join(
-                _format_config(c) for c in chunk
-            )
-            try:
-                await bot.send_message(
-                    user_id, text, parse_mode="HTML", disable_web_page_preview=True
-                )
-            except Exception as e:
-                logger.error("Failed to send to %s: %s", user_id, e)
+        await _send_configs(user_id, configs, header="Новые рабочие конфиги:", bot=bot)
+        await asyncio.sleep(0.5)
 
 
 async def broadcast_dead_configs(bot: Bot, configs: list[dict]):
@@ -103,10 +96,10 @@ async def broadcast_dead_configs(bot: Bot, configs: list[dict]):
     users = await get_all_users()
     for user_id in users:
         text = f"<b>Удалены нерабочие конфиги ({len(configs)}):</b>\n"
-        for c in configs:
+        for c in configs[:30]:
             name = c.get("name", "unnamed")
             text += f"  - {name} ({c.get('protocol', '?')})\n"
         try:
             await bot.send_message(user_id, text, parse_mode="HTML")
         except Exception as e:
-            logger.error("Failed to send to %s: %s", user_id, e)
+            logger.error("Send error to %s: %s", user_id, e)
