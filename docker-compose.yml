@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    container_name: v2ray-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot_db:/app/v2ray_bot.db
+
+volumes:
+  bot_db:
