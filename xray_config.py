@@ -14,14 +14,16 @@ def _parse_vmess(raw: str) -> dict | None:
     try:
         encoded = raw.replace("vmess://", "")
         d = json.loads(base64.b64decode(_pad(encoded)))
+        tls_val = d.get("tls", "")
+        if tls_val == "":
+            tls_val = "none"
         return {
             "address": d.get("add", ""),
             "port": int(d.get("port", 0)),
             "uuid": d.get("id", ""),
             "alterId": int(d.get("aid", 0)),
             "network": d.get("net", "tcp"),
-            "security": d.get("tls", ""),
-            "type": d.get("type", "none"),
+            "security": tls_val,
             "host": d.get("host", ""),
             "path": d.get("path", ""),
             "sni": d.get("sni", d.get("host", "")),
@@ -29,6 +31,7 @@ def _parse_vmess(raw: str) -> dict | None:
             "fp": d.get("fp", ""),
             "pbk": d.get("pbk", ""),
             "sid": d.get("sid", ""),
+            "alpn": d.get("alpn", ""),
         }
     except Exception:
         return None
@@ -64,6 +67,7 @@ def _parse_vless(raw: str) -> dict | None:
             "fp": params.get("fp", ""),
             "pbk": params.get("pbk", ""),
             "sid": params.get("sid", ""),
+            "alpn": params.get("alpn", ""),
         }
     except Exception:
         return None
@@ -85,17 +89,22 @@ def _parse_trojan(raw: str) -> dict | None:
                 if "=" in p:
                     k, v = p.split("=", 1)
                     params[k] = unquote(v)
+        security = params.get("security", "tls")
+        if security == "":
+            security = "tls"
         return {
             "address": server,
             "port": int(port_str),
             "password": unquote(password),
             "network": params.get("type", "tcp"),
-            "security": params.get("security", "tls"),
+            "security": security,
             "sni": params.get("sni", ""),
             "path": params.get("path", ""),
             "host": params.get("host", ""),
             "serviceName": params.get("serviceName", ""),
             "allowInsecure": params.get("allowInsecure", "0") == "1",
+            "alpn": params.get("alpn", ""),
+            "fp": params.get("fp", ""),
         }
     except Exception:
         return None
@@ -128,7 +137,11 @@ def _parse_ss(raw: str) -> dict | None:
 
 def _build_stream(params: dict) -> dict:
     network = params.get("network", "tcp")
+    if network == "h2":
+        network = "http"
     security = params.get("security", "none")
+    if security in ("", "0", "false", "None"):
+        security = "none"
     stream = {"network": network}
 
     if security == "reality":
@@ -138,18 +151,29 @@ def _build_stream(params: dict) -> dict:
             rset["serverName"] = params["sni"]
         if params.get("fp"):
             rset["fingerprint"] = params["fp"]
+        else:
+            rset["fingerprint"] = "chrome"
         if params.get("pbk"):
             rset["publicKey"] = params["pbk"]
         if params.get("sid"):
             rset["shortId"] = params["sid"]
         stream["realitySettings"] = rset
-    elif security in ("tls",):
+    elif security in ("tls", "1", "true"):
         stream["security"] = "tls"
         tset = {}
-        if params.get("sni"):
-            tset["serverName"] = params["sni"]
+        sni = params.get("sni", "")
+        if not sni and params.get("host"):
+            sni = params["host"]
+        if sni:
+            tset["serverName"] = sni
+        else:
+            tset["allowInsecure"] = True
         if params.get("allowInsecure"):
             tset["allowInsecure"] = True
+        if params.get("alpn"):
+            tset["alpn"] = params["alpn"].split(",")
+        if params.get("fp"):
+            tset["fingerprint"] = params["fp"]
         stream["tlsSettings"] = tset
     else:
         stream["security"] = "none"
@@ -166,13 +190,19 @@ def _build_stream(params: dict) -> dict:
         if params.get("serviceName"):
             grpc["serviceName"] = params["serviceName"]
         stream["grpcSettings"] = grpc
-    elif network in ("h2", "http"):
+    elif network == "http":
         h2 = {}
         if params.get("path"):
             h2["path"] = params["path"]
-        if params.get("host"):
-            h2["host"] = [params["host"]]
+        host_val = params.get("host", "")
+        if host_val:
+            h2["host"] = [h.strip() for h in host_val.split(",")]
         stream["httpSettings"] = h2
+    elif network == "kcp":
+        kcp = {}
+        if params.get("serviceName"):
+            kcp["header"] = {"type": params["serviceName"]}
+        stream["kcpSettings"] = kcp
 
     return stream
 

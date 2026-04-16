@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import tempfile
 
 from parser import ParsedConfig
@@ -11,11 +12,15 @@ from config import CHECK_TIMEOUT_SECONDS
 logger = logging.getLogger(__name__)
 
 XRAY_BIN = "/usr/local/bin/xray"
-XRAY_START_DELAY = 2
-MAX_CONCURRENT = 3
-DELAY_BETWEEN_CHECKS = 1.5
-TEST_URL = "http://www.gstatic.com/generate_204"
-_local_port_counter = 20000
+XRAY_START_DELAY = 3
+MAX_CONCURRENT = 2
+DELAY_BETWEEN_CHECKS = 3
+RETRY_ATTEMPTS = 2
+TEST_URLS = [
+    "http://ip-api.com/json?fields=query",
+    "https://api.ipify.org?format=json",
+]
+_local_port_counter = 30000
 
 
 def _next_port() -> int:
@@ -24,7 +29,61 @@ def _next_port() -> int:
     return _local_port_counter
 
 
+def _is_private_ip(ip: str) -> bool:
+    for prefix in ("10.", "172.16.", "172.17.", "172.18.", "172.19.",
+                   "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+                   "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+                   "172.30.", "172.31.",
+                   "192.168.", "127.", "0.", "localhost"):
+        if ip.startswith(prefix):
+            return True
+    return False
+
+
+async def _wait_for_port(port: int, timeout: float = 5) -> bool:
+    for _ in range(int(timeout * 10)):
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except (ConnectionRefusedError, OSError):
+            await asyncio.sleep(0.1)
+    return False
+
+
+async def _test_proxy(port: int, timeout: int) -> bool:
+    for url in TEST_URLS:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s",
+                "--socks5-hostname", f"127.0.0.1:{port}",
+                "--connect-timeout", str(timeout),
+                "-m", str(timeout + 3),
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
+            body = stdout.decode().strip()
+            if not body:
+                continue
+            try:
+                data = json.loads(body)
+                ip = data.get("query") or data.get("ip", "")
+                if ip and not _is_private_ip(ip):
+                    return True
+            except json.JSONDecodeError:
+                pass
+        except Exception:
+            continue
+    return False
+
+
 async def check_config(config: ParsedConfig) -> bool:
+    if _is_private_ip(config.server):
+        return False
+
     port = _next_port()
     xray_cfg = generate_xray_config(config.raw, port)
     if not xray_cfg:
@@ -47,31 +106,23 @@ async def check_config(config: ParsedConfig) -> bool:
         await asyncio.sleep(XRAY_START_DELAY)
 
         if process.returncode is not None:
-            stderr = await process.stderr.read()
-            logger.debug("Xray exited for %s: %s", config.name, stderr[:200])
             return False
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                "--socks5", f"127.0.0.1:{port}",
-                "--connect-timeout", str(CHECK_TIMEOUT_SECONDS),
-                "-m", str(CHECK_TIMEOUT_SECONDS + 2),
-                TEST_URL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=CHECK_TIMEOUT_SECONDS + 5)
-            status = stdout.decode().strip()
-            if status in ("200", "204"):
+        port_ready = await _wait_for_port(port, timeout=3)
+        if not port_ready:
+            logger.debug("Port %d not ready for %s", port, config.name)
+            return False
+
+        for attempt in range(RETRY_ATTEMPTS):
+            if await _test_proxy(port, CHECK_TIMEOUT_SECONDS):
                 logger.info("WORKING: %s:%d (%s) [%s]", config.server, config.port, config.name, config.protocol)
                 return True
-            else:
-                logger.debug("HTTP %s for %s (%s)", status, config.name, config.protocol)
-                return False
-        except Exception as e:
-            logger.debug("curl failed for %s: %s", config.name, e)
-            return False
+            if attempt < RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(2)
+
+        logger.debug("FAILED: %s:%d (%s) [%s]", config.server, config.port, config.name, config.protocol)
+        return False
+
     except Exception as e:
         logger.error("check_config error for %s: %s", config.name, e)
         return False
