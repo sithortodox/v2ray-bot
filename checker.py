@@ -22,12 +22,6 @@ BLACKLIST_PASSWORDS = {
     "pass", "1234", "0000", "1111", "abcd", "guest",
 }
 
-HTTPS_TEST_URLS = [
-    ("https://www.google.com/generate_204", "204"),
-    ("https://cp.cloudflare.com/", "204"),
-    ("https://www.youtube.com/generate_204", "204"),
-]
-
 
 def _next_port() -> int:
     global _local_port_counter
@@ -54,6 +48,12 @@ def is_blacklisted(config: ParsedConfig) -> bool:
     return False
 
 
+def must_have_encryption(config: ParsedConfig) -> bool:
+    if config.protocol == "ss":
+        return False
+    return config.has_encryption
+
+
 async def _wait_for_port(port: int, timeout: float = 5) -> bool:
     for _ in range(int(timeout * 10)):
         try:
@@ -66,14 +66,15 @@ async def _wait_for_port(port: int, timeout: float = 5) -> bool:
     return False
 
 
-async def _verify_http_ip(port: int, timeout: int) -> dict | None:
+async def _deep_https_verify(port: int, timeout: int) -> dict | None:
+    test_url = "https://ip-api.com/json"
     try:
         proc = await asyncio.create_subprocess_exec(
             "curl", "-s",
             "--socks5-hostname", f"127.0.0.1:{port}",
             "--connect-timeout", str(timeout),
             "-m", str(timeout + 5),
-            "http://ip-api.com/json",
+            test_url,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -94,25 +95,24 @@ async def _verify_http_ip(port: int, timeout: int) -> dict | None:
         return None
 
 
-async def _verify_https(port: int, timeout: int) -> bool:
-    for url, expected_code in HTTPS_TEST_URLS:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                "--socks5-hostname", f"127.0.0.1:{port}",
-                "--connect-timeout", str(timeout),
-                "-m", str(timeout + 5),
-                url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 8)
-            code = stdout.decode().strip()
-            if code in ("200", expected_code, "301", "302"):
-                return True
-        except Exception:
-            continue
-    return False
+async def _download_content_verify(port: int, timeout: int) -> bool:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-s",
+            "--socks5-hostname", f"127.0.0.1:{port}",
+            "--connect-timeout", str(timeout),
+            "-m", str(timeout + 5),
+            "https://raw.githubusercontent.com/sithortodox/v2ray-bot/main/.gitignore",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 8)
+        if proc.returncode != 0:
+            return False
+        body = stdout.decode().strip()
+        return len(body) > 10 and "__pycache__" in body
+    except Exception:
+        return False
 
 
 async def check_config(config: ParsedConfig) -> bool:
@@ -121,6 +121,10 @@ async def check_config(config: ParsedConfig) -> bool:
 
     if is_blacklisted(config):
         logger.debug("Blacklisted: %s", config.name)
+        return False
+
+    if not must_have_encryption(config):
+        logger.debug("No encryption: %s [%s] - skipping", config.name, config.protocol)
         return False
 
     port = _next_port()
@@ -145,20 +149,23 @@ async def check_config(config: ParsedConfig) -> bool:
         await asyncio.sleep(XRAY_START_DELAY)
 
         if process.returncode is not None:
+            logger.debug("Xray crashed for %s", config.name)
             return False
 
         if not await _wait_for_port(port, timeout=4):
+            logger.debug("Port not ready for %s", config.name)
             return False
 
         for attempt in range(RETRY_ATTEMPTS):
-            ip_data = await _verify_http_ip(port, CHECK_TIMEOUT_SECONDS)
+            ip_data = await _deep_https_verify(port, CHECK_TIMEOUT_SECONDS)
             if not ip_data:
                 if attempt < RETRY_ATTEMPTS - 1:
                     await asyncio.sleep(2)
                 continue
 
-            if not await _verify_https(port, CHECK_TIMEOUT_SECONDS):
-                logger.debug("HTTPS failed for %s — not usable", config.name)
+            content_ok = await _download_content_verify(port, CHECK_TIMEOUT_SECONDS)
+            if not content_ok:
+                logger.debug("Content download failed for %s — proxy unusable", config.name)
                 break
 
             country = ip_data.get("countryCode", "??")

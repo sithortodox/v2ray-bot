@@ -7,15 +7,6 @@ from database import add_user, get_working_configs, get_stats, get_all_users
 logger = logging.getLogger(__name__)
 router = Router()
 
-MAX_MSG_LEN = 3800
-
-
-def _format_config(cfg: dict) -> str:
-    name = cfg.get("name", "unnamed")
-    protocol = cfg.get("protocol", "unknown")
-    raw = cfg.get("raw_config", "")
-    return f"{name} [{protocol}]\n{raw}"
-
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -36,7 +27,7 @@ async def cmd_get(message: types.Message):
     if not configs:
         await message.answer("Рабочих конфигов пока нет. Подожди, идёт сбор.")
         return
-    await _send_configs(message.from_user.id, configs, header="Рабочие конфиги:", bot=message.bot)
+    await _send_configs(message.from_user.id, configs, bot=message.bot)
 
 
 @router.message(Command("status"))
@@ -62,23 +53,26 @@ async def cmd_unsubscribe(message: types.Message):
     await message.answer("Подписка отменена.")
 
 
-async def _send_configs(user_id: int, configs: list[dict], header: str, bot: Bot):
-    text = f"{header}\n\n"
-    for cfg in configs:
-        entry = _format_config(cfg) + "\n\n"
-        if len(text) + len(entry) > MAX_MSG_LEN:
-            try:
-                await bot.send_message(user_id, text.rstrip())
-            except Exception as e:
-                logger.error("Send error to %s: %s", user_id, e)
-            text = f"{header} (продолжение)\n\n"
-            await asyncio.sleep(0.3)
-        text += entry
-    if text.strip():
+async def _send_configs(user_id: int, configs: list[dict], bot: Bot, header: str = ""):
+    if header:
         try:
-            await bot.send_message(user_id, text.rstrip())
+            await bot.send_message(user_id, header)
         except Exception as e:
             logger.error("Send error to %s: %s", user_id, e)
+
+    for cfg in configs:
+        name = cfg.get("name", "unnamed")
+        protocol = cfg.get("protocol", "?")
+        raw = cfg.get("raw_config", "")
+        label = f"{name} [{protocol}]"
+        try:
+            await bot.send_message(user_id, f"<b>{label}</b>\n<pre>{raw}</pre>", parse_mode="HTML")
+        except Exception:
+            try:
+                await bot.send_message(user_id, f"{label}\n{raw}")
+            except Exception as e:
+                logger.error("Send error to %s: %s", user_id, e)
+        await asyncio.sleep(0.5)
 
 
 async def broadcast_new_configs(bot: Bot, configs: list[dict]):
@@ -86,7 +80,7 @@ async def broadcast_new_configs(bot: Bot, configs: list[dict]):
         return
     users = await get_all_users()
     for user_id in users:
-        await _send_configs(user_id, configs, header="Новые рабочие конфиги:", bot=bot)
+        await _send_configs(user_id, configs, bot=bot, header="Новые рабочие конфиги:")
         await asyncio.sleep(0.5)
 
 

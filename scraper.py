@@ -8,7 +8,7 @@ from config import (
     SUBSCRIPTION_URLS, KNOWN_REPO_FILES,
 )
 from parser import extract_configs, decode_subscription, ParsedConfig
-from checker import is_blacklisted
+from checker import is_blacklisted, must_have_encryption
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +79,10 @@ def _filter_configs(configs: list[ParsedConfig]) -> list[ParsedConfig]:
     for cfg in configs:
         if is_blacklisted(cfg):
             continue
-        if cfg.protocol == "ss" and cfg.port in (443, 80, 8080):
+        if not must_have_encryption(cfg):
             continue
         result.append(cfg)
-    vmess_vless = [c for c in result if c.protocol in ("vmess", "vless", "trojan")]
-    ss = [c for c in result if c.protocol == "ss"]
-    return vmess_vless + ss
+    return result
 
 
 async def scrape_known_repos() -> list[ParsedConfig]:
