@@ -101,6 +101,14 @@ async def get_config_by_raw(raw_config: str):
             return dict(row) if row else None
 
 
+async def get_config_by_id(config_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM configs WHERE id = ?", (config_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
 async def delete_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
