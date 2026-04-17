@@ -8,16 +8,18 @@ from database import (
     update_config_status,
     delete_config,
     get_configs_to_recheck,
+    get_working_configs,
 )
 from scraper import scrape_all
 from checker import check_config
 from parser import ParsedConfig
 from bot import broadcast_new_configs, broadcast_dead_configs
+from github_push import push_working_configs
 from config import CHECK_INTERVAL_MINUTES
 
 logger = logging.getLogger(__name__)
 
-MAX_NEW_CONFIGS_PER_CYCLE = 80
+MAX_NEW_CONFIGS_PER_CYCLE = 100
 DELAY_BETWEEN_CHECKS = 2
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -40,7 +42,7 @@ async def _update_by_raw(raw: str, is_working: bool):
 async def _run_check_cycle(bot: Bot):
     logger.info("=== Check cycle started at %s ===", datetime.utcnow().isoformat())
 
-    logger.info("Phase 1: Scraping GitHub...")
+    logger.info("Phase 1: Scraping...")
     new_configs = await scrape_all()
     new_configs = new_configs[:MAX_NEW_CONFIGS_PER_CYCLE]
     logger.info("Scraped %d configs (limited to %d)", len(new_configs), MAX_NEW_CONFIGS_PER_CYCLE)
@@ -109,6 +111,11 @@ async def _run_check_cycle(bot: Bot):
         await broadcast_new_configs(bot, new_working)
     if dead_configs:
         await broadcast_dead_configs(bot, dead_configs)
+
+    logger.info("Phase 3: Pushing working configs to GitHub...")
+    all_working = await get_working_configs()
+    working_raw = [c["raw_config"] for c in all_working]
+    push_working_configs(working_raw, len(dead_configs))
 
     logger.info("=== Check cycle finished ===")
 
