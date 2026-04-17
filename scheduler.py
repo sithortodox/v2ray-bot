@@ -94,6 +94,7 @@ async def _run_check_cycle(bot: Bot):
             server=cfg_row["server"],
             port=cfg_row["port"],
             name=cfg_row["name"],
+            has_encryption=True,
         )
         is_working = await check_config(parsed)
         if is_working:
