@@ -66,15 +66,14 @@ async def _wait_for_port(port: int, timeout: float = 5) -> bool:
     return False
 
 
-async def _deep_https_verify(port: int, timeout: int) -> dict | None:
-    test_url = "https://ip-api.com/json"
+async def _check_http_ip(port: int, timeout: int) -> dict | None:
     try:
         proc = await asyncio.create_subprocess_exec(
             "curl", "-s",
             "--socks5-hostname", f"127.0.0.1:{port}",
             "--connect-timeout", str(timeout),
             "-m", str(timeout + 5),
-            test_url,
+            "http://ip-api.com/json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -95,24 +94,30 @@ async def _deep_https_verify(port: int, timeout: int) -> dict | None:
         return None
 
 
-async def _download_content_verify(port: int, timeout: int) -> bool:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "curl", "-s",
-            "--socks5-hostname", f"127.0.0.1:{port}",
-            "--connect-timeout", str(timeout),
-            "-m", str(timeout + 5),
-            "https://raw.githubusercontent.com/sithortodox/v2ray-bot/main/.gitignore",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 8)
-        if proc.returncode != 0:
-            return False
-        body = stdout.decode().strip()
-        return len(body) > 10 and "__pycache__" in body
-    except Exception:
-        return False
+async def _check_https(port: int, timeout: int) -> bool:
+    test_urls = [
+        "https://www.google.com/generate_204",
+        "https://cp.cloudflare.com/",
+        "https://www.youtube.com/generate_204",
+    ]
+    for url in test_urls:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+                "--socks5-hostname", f"127.0.0.1:{port}",
+                "--connect-timeout", str(timeout),
+                "-m", str(timeout + 5),
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 8)
+            code = stdout.decode().strip()
+            if code in ("200", "204", "301", "302"):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def check_config(config: ParsedConfig) -> bool:
@@ -124,13 +129,13 @@ async def check_config(config: ParsedConfig) -> bool:
         return False
 
     if not must_have_encryption(config):
-        logger.debug("No encryption: %s [%s] - skipping", config.name, config.protocol)
+        logger.info("No encryption, skip: %s [%s]", config.name, config.protocol)
         return False
 
     port = _next_port()
     xray_cfg = generate_xray_config(config.raw, port)
     if not xray_cfg:
-        logger.debug("Cannot generate xray config for %s", config.name)
+        logger.info("No xray config: %s [%s]", config.name, config.protocol)
         return False
 
     config_file = None
@@ -149,32 +154,35 @@ async def check_config(config: ParsedConfig) -> bool:
         await asyncio.sleep(XRAY_START_DELAY)
 
         if process.returncode is not None:
-            logger.debug("Xray crashed for %s", config.name)
+            logger.info("Xray crash: %s [%s]", config.name, config.protocol)
             return False
 
         if not await _wait_for_port(port, timeout=4):
-            logger.debug("Port not ready for %s", config.name)
+            logger.info("Port not ready: %s [%s]", config.name, config.protocol)
             return False
 
         for attempt in range(RETRY_ATTEMPTS):
-            ip_data = await _deep_https_verify(port, CHECK_TIMEOUT_SECONDS)
-            if not ip_data:
-                if attempt < RETRY_ATTEMPTS - 1:
-                    await asyncio.sleep(2)
-                continue
+            ip_data = await _check_http_ip(port, CHECK_TIMEOUT_SECONDS)
+            if ip_data:
+                https_ok = await _check_https(port, CHECK_TIMEOUT_SECONDS)
+                country = ip_data.get("countryCode", "??")
+                if https_ok:
+                    logger.info(
+                        "WORKING: %s:%d (%s) [%s] via %s HTTPS=yes",
+                        config.server, config.port, config.name, config.protocol, country,
+                    )
+                    return True
+                else:
+                    logger.info(
+                        "HTTP ok but HTTPS fail: %s:%d (%s) [%s] via %s",
+                        config.server, config.port, config.name, config.protocol, country,
+                    )
+                    return False
 
-            content_ok = await _download_content_verify(port, CHECK_TIMEOUT_SECONDS)
-            if not content_ok:
-                logger.debug("Content download failed for %s — proxy unusable", config.name)
-                break
+            if attempt < RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(2)
 
-            country = ip_data.get("countryCode", "??")
-            logger.info(
-                "WORKING: %s:%d (%s) [%s] via %s",
-                config.server, config.port, config.name, config.protocol, country,
-            )
-            return True
-
+        logger.info("Failed all attempts: %s [%s]", config.name, config.protocol)
         return False
 
     except Exception as e:

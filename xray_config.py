@@ -151,11 +151,10 @@ def _build_stream(params: dict) -> dict:
 
     if security == "reality":
         stream["security"] = "reality"
-        rset = {
-            "fingerprint": params.get("fp") or "chrome",
-        }
+        rset = {}
         if params.get("sni"):
             rset["serverName"] = params["sni"]
+        rset["fingerprint"] = params.get("fp") or "chrome"
         if params.get("pbk"):
             rset["publicKey"] = params["pbk"]
         if params.get("sid") is not None:
@@ -164,9 +163,7 @@ def _build_stream(params: dict) -> dict:
 
     elif security in ("tls",):
         stream["security"] = "tls"
-        tset = {
-            "fingerprint": params.get("fp") or "chrome",
-        }
+        tset = {}
         sni = params.get("sni", "")
         if not sni and params.get("host"):
             sni = params["host"]
