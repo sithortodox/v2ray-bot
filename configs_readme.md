@@ -4,7 +4,7 @@ Auto-collected from GitHub and subscription sources.
 
 - Working configs: **57**
 - Removed dead configs: **0**
-- Last updated: 2026-04-19 09:26 UTC
+- Last updated: 2026-04-19 09:43 UTC
 - Check interval: every 60 minutes
 
 ## Files
