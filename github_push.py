@@ -81,6 +81,15 @@ def push_working_configs(working_raw: list[str], dead_count: int):
 
         subprocess.run(["git", "add", "-A"], cwd=tmpdir, capture_output=True, timeout=10)
 
+        subprocess.run(
+            ["git", "config", "user.email", "bot@v2ray.local"],
+            cwd=tmpdir, capture_output=True, timeout=5,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "v2ray-bot"],
+            cwd=tmpdir, capture_output=True, timeout=5,
+        )
+
         r = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=tmpdir, capture_output=True, timeout=10,
