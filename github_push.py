@@ -1,8 +1,10 @@
 import base64
 import logging
+import os
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 
-from github import Github, GithubException
 from config import GITHUB_TOKEN, PUSH_REPO, PUSH_BRANCH
 
 logger = logging.getLogger(__name__)
@@ -10,10 +12,7 @@ logger = logging.getLogger(__name__)
 WORKING_FILE = "working.txt"
 WORKING_BASE64_FILE = "working_base64.txt"
 README_FILE = "configs_readme.md"
-
-
-def _gh():
-    return Github(GITHUB_TOKEN)
+REPO_URL = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{PUSH_REPO}.git"
 
 
 def _make_base64(configs: list[str]) -> str:
@@ -54,41 +53,57 @@ def push_working_configs(working_raw: list[str], dead_count: int):
         logger.info("No working configs to push")
         return
 
+    tmpdir = tempfile.mkdtemp(prefix="v2ray_push_")
     try:
-        gh = _gh()
-        repo = gh.get_repo(PUSH_REPO)
+        r = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", PUSH_BRANCH, REPO_URL, tmpdir],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            logger.error("git clone failed: %s", r.stderr[:200])
+            return
+
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         raw_content = "\n".join(working_raw)
         b64_content = _make_base64(working_raw)
         readme_content = _make_readme(len(working_raw), dead_count, now)
 
-        for path, content, msg in [
-            (WORKING_FILE, raw_content, f"Update working configs ({len(working_raw)}) - {now}"),
-            (WORKING_BASE64_FILE, b64_content, f"Update base64 subscription - {now}"),
-            (README_FILE, readme_content, f"Update stats - {now}"),
+        for path, content in [
+            (WORKING_FILE, raw_content),
+            (WORKING_BASE64_FILE, b64_content),
+            (README_FILE, readme_content),
         ]:
-            try:
-                existing = repo.get_contents(path, ref=PUSH_BRANCH)
-                repo.update_file(
-                    path=path,
-                    message=msg,
-                    content=content,
-                    sha=existing.sha,
-                    branch=PUSH_BRANCH,
-                )
-            except GithubException as e:
-                if e.status == 404:
-                    repo.create_file(
-                        path=path,
-                        message=msg,
-                        content=content,
-                        branch=PUSH_BRANCH,
-                    )
-                else:
-                    raise
+            full_path = os.path.join(tmpdir, path)
+            os.makedirs(os.path.dirname(full_path) or ".", exist_ok=True)
+            with open(full_path, "w") as f:
+                f.write(content)
 
-        logger.info("Pushed %d working configs to %s", len(working_raw), PUSH_REPO)
+        subprocess.run(["git", "add", "-A"], cwd=tmpdir, capture_output=True, timeout=10)
+
+        r = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=tmpdir, capture_output=True, timeout=10,
+        )
+        if r.returncode == 0:
+            logger.info("No changes to push")
+            return
+
+        subprocess.run(
+            ["git", "commit", "-m", f"Update working configs ({len(working_raw)}) - {now}"],
+            cwd=tmpdir, capture_output=True, text=True, timeout=10,
+        )
+
+        r = subprocess.run(
+            ["git", "push"],
+            cwd=tmpdir, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            logger.error("git push failed: %s", r.stderr[:200])
+        else:
+            logger.info("Pushed %d working configs to %s", len(working_raw), PUSH_REPO)
 
     except Exception as e:
         logger.error("Failed to push to GitHub: %s", e)
+    finally:
+        subprocess.run(["rm", "-rf", tmpdir], capture_output=True)
